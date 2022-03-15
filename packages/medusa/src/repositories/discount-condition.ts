@@ -6,8 +6,10 @@ import {
   Not,
   Repository,
 } from "typeorm"
+import { Customer } from "../models/customer"
 import {
   DiscountCondition,
+  DiscountConditionOperator,
   DiscountConditionType,
 } from "../models/discount-condition"
 import { DiscountConditionCustomerGroup } from "../models/discount-condition-customer-group"
@@ -142,5 +144,83 @@ export class DiscountConditionRepository extends Repository<DiscountCondition> {
       .select()
       .where(insertResult.identifiers)
       .getMany()
+  }
+
+  async queryConditionTable({
+    type,
+    condId,
+    conditionTypeId,
+  }): Promise<
+    (
+      | DiscountConditionProduct
+      | DiscountConditionProductType
+      | DiscountConditionProductCollection
+      | DiscountConditionProductTag
+      | DiscountConditionCustomerGroup
+    )[]
+  > {
+    const { fromTable, resourceId } = this.getResourceIdentifiers(type)
+
+    if (fromTable) {
+      return await this.manager
+        .createQueryBuilder(fromTable, "conds")
+        .select()
+        .where(`${"conds"}.${resourceId} = :conditionTypeId`, {
+          conditionTypeId,
+        })
+        .andWhere(`${"conds"}.condition_id = :condId`, {
+          condId,
+        })
+        .getMany()
+    }
+
+    return []
+  }
+
+  async isValidForCustomer(
+    discountRuleId: string,
+    customer: Customer
+  ): Promise<boolean> {
+    const discountConditions = await this.createQueryBuilder("discon")
+      .select(["discon.id", "discon.type", "discon.operator"])
+      .where("discon.discount_rule_id = :discountRuleId", {
+        discountRuleId,
+      })
+      .getMany()
+
+    // in case of no discount conditions, we assume that the discount
+    // is valid for all
+    if (!discountConditions.length) {
+      return true
+    }
+
+    // retrieve conditions for customer groups
+    // if condition operation is `in` and the query for conditions defined for the given type is empty, the discount is invalid
+    // if condition operation is `not_in` and the query for conditions defined for the given type is not empty, the discount is invalid
+    for (const condition of discountConditions) {
+      for (const group of customer.groups) {
+        const customerGroupConditions = await this.queryConditionTable({
+          type: "customer_groups",
+          condId: condition.id,
+          conditionTypeId: group.id,
+        })
+
+        if (
+          condition.operator === DiscountConditionOperator.IN &&
+          !customerGroupConditions.length
+        ) {
+          return false
+        }
+
+        if (
+          condition.operator === DiscountConditionOperator.NOT_IN &&
+          customerGroupConditions.length
+        ) {
+          return false
+        }
+      }
+    }
+
+    return true
   }
 }
